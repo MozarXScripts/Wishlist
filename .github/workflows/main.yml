@@ -9,10 +9,673 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Create project files
+        run: |
+          mkdir -p Sources
+          cat > project.yml <<'WISHLIST_EOF'
+          name: Wishlist
+          options:
+            bundleIdPrefix: com.wishlist
+            deploymentTarget:
+              iOS: "17.0"
+          targets:
+            Wishlist:
+              type: application
+              platform: iOS
+              sources: [Sources]
+              settings:
+                base:
+                  PRODUCT_BUNDLE_IDENTIFIER: com.wishlist.app
+                  GENERATE_INFOPLIST_FILE: YES
+                  INFOPLIST_KEY_CFBundleDisplayName: Wishlist
+                  INFOPLIST_KEY_UILaunchScreen_Generation: YES
+                  INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone: UIInterfaceOrientationPortrait
+                  TARGETED_DEVICE_FAMILY: "1"
+                  MARKETING_VERSION: "1.0"
+                  CURRENT_PROJECT_VERSION: "1"
+                  SWIFT_VERSION: "5.0"
+          WISHLIST_EOF
+          cat > Sources/AddItemView.swift <<'WISHLIST_EOF'
+          import SwiftUI
+          import SafariServices
+
+          struct WebLink: Identifiable {
+              let id = UUID()
+              let url: URL
+          }
+
+          struct SafariView: UIViewControllerRepresentable {
+              let url: URL
+              func makeUIViewController(context: Context) -> SFSafariViewController {
+                  SFSafariViewController(url: url)
+              }
+              func updateUIViewController(_ vc: SFSafariViewController, context: Context) {}
+          }
+
+          struct Store: Identifiable {
+              let id = UUID()
+              let name: String
+              let icon: String
+              let base: String
+          }
+
+          struct AddItemView: View {
+              @EnvironmentObject var store: WishStore
+              @Environment(\.dismiss) private var dismiss
+
+              @State var occasion: Occasion
+              @State private var name = ""
+              @State private var note = ""
+              @State private var price = ""
+              @State private var link = ""
+              @State private var web: WebLink?
+
+              init(defaultOccasion: Occasion) {
+                  _occasion = State(initialValue: defaultOccasion)
+              }
+
+              private let stores: [Store] = [
+                  Store(name: "Amazon", icon: "cart.fill", base: "https://www.amazon.com/s?k="),
+                  Store(name: "Target", icon: "target", base: "https://www.target.com/s?searchTerm="),
+                  Store(name: "Walmart", icon: "bag.fill", base: "https://www.walmart.com/search?q="),
+                  Store(name: "Google", icon: "magnifyingglass", base: "https://www.google.com/search?tbm=shop&q=")
+              ]
+
+              var body: some View {
+                  NavigationStack {
+                      Form {
+                          Section("What do you want?") {
+                              TextField("e.g. LEGO Millennium Falcon", text: $name)
+                              TextField("Notes (color, size...)", text: $note)
+                          }
+
+                          Section("Find it online") {
+                              ScrollView(.horizontal, showsIndicators: false) {
+                                  HStack(spacing: 10) {
+                                      ForEach(stores) { s in
+                                          Button { open(s) } label: {
+                                              Label(s.name, systemImage: s.icon)
+                                                  .font(.subheadline.weight(.semibold))
+                                                  .padding(.horizontal, 14).padding(.vertical, 10)
+                                                  .background(Color.accentColor.opacity(0.12), in: Capsule())
+                                          }
+                                          .buttonStyle(.plain)
+                                          .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
+                                      }
+                                  }
+                              }
+                              HStack {
+                                  TextField("Paste product link", text: $link)
+                                      .textInputAutocapitalization(.never)
+                                      .keyboardType(.URL)
+                                      .autocorrectionDisabled()
+                                  Button("Paste") {
+                                      if let s = UIPasteboard.general.string { link = s }
+                                  }
+                              }
+                              TextField("Price (optional)", text: $price)
+                              Text("Tip: in the store page, tap the share button, choose Copy, then come back and tap Paste.")
+                                  .font(.caption)
+                                  .foregroundStyle(.secondary)
+                          }
+
+                          Section("Occasion") {
+                              ScrollView(.horizontal, showsIndicators: false) {
+                                  HStack(spacing: 8) {
+                                      ForEach(Occasion.allCases) { o in
+                                          Button { occasion = o } label: {
+                                              OccasionChip(title: o.title, emoji: o.emoji,
+                                                           color: o.color, selected: occasion == o)
+                                          }
+                                          .buttonStyle(.plain)
+                                      }
+                                  }
+                              }
+                          }
+                      }
+                      .navigationTitle("New Wish")
+                      .navigationBarTitleDisplayMode(.inline)
+                      .toolbar {
+                          ToolbarItem(placement: .cancellationAction) {
+                              Button("Cancel") { dismiss() }
+                          }
+                          ToolbarItem(placement: .confirmationAction) {
+                              Button("Add") { save() }
+                                  .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
+                                  .fontWeight(.bold)
+                          }
+                      }
+                      .sheet(item: $web) { w in
+                          SafariView(url: w.url).ignoresSafeArea()
+                      }
+                  }
+              }
+
+              private func open(_ s: Store) {
+                  let q = name.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? name
+                  if let url = URL(string: s.base + q) { web = WebLink(url: url) }
+              }
+
+              private func save() {
+                  var urlString = link.trimmingCharacters(in: .whitespacesAndNewlines)
+                  if !urlString.isEmpty && !urlString.lowercased().hasPrefix("http") {
+                      urlString = "https://" + urlString
+                  }
+                  let item = WishItem(
+                      name: name.trimmingCharacters(in: .whitespaces),
+                      note: note,
+                      urlString: urlString,
+                      price: price,
+                      occasion: occasion
+                  )
+                  store.add(item)
+                  dismiss()
+              }
+          }
+          WISHLIST_EOF
+          cat > Sources/Models.swift <<'WISHLIST_EOF'
+          import SwiftUI
+
+          enum Occasion: String, Codable, CaseIterable, Identifiable {
+              case christmas, birthday, hanukkah, easter, justBecause
+
+              var id: String { rawValue }
+
+              var title: String {
+                  switch self {
+                  case .christmas: return "Christmas"
+                  case .birthday: return "Birthday"
+                  case .hanukkah: return "Hanukkah"
+                  case .easter: return "Easter"
+                  case .justBecause: return "Just Because"
+                  }
+              }
+
+              var emoji: String {
+                  switch self {
+                  case .christmas: return "🎄"
+                  case .birthday: return "🎂"
+                  case .hanukkah: return "🕎"
+                  case .easter: return "🐣"
+                  case .justBecause: return "🎁"
+                  }
+              }
+
+              var color: Color {
+                  switch self {
+                  case .christmas: return .red
+                  case .birthday: return .pink
+                  case .hanukkah: return .blue
+                  case .easter: return .purple
+                  case .justBecause: return .orange
+                  }
+              }
+          }
+
+          struct WishItem: Identifiable, Codable, Hashable {
+              var id = UUID()
+              var name: String
+              var note: String = ""
+              var urlString: String = ""
+              var price: String = ""
+              var occasion: Occasion
+              var isGot: Bool = false
+              var addedAt = Date()
+          }
+          WISHLIST_EOF
+          cat > Sources/Notifier.swift <<'WISHLIST_EOF'
+          import Foundation
+
+          /// Sends free push notifications to a parent through ntfy.sh.
+          /// The parent installs the free "ntfy" app and subscribes to the family topic.
+          enum Notifier {
+              private struct Payload: Encodable {
+                  let topic: String
+                  let title: String
+                  let message: String
+                  let tags: [String]
+                  let click: String?
+              }
+
+              static func send(topic: String, title: String, message: String, link: String? = nil) async {
+                  guard !topic.isEmpty, let url = URL(string: "https://ntfy.sh") else { return }
+                  let payload = Payload(
+                      topic: topic,
+                      title: title,
+                      message: message,
+                      tags: ["gift"],
+                      click: (link?.isEmpty == false) ? link : nil
+                  )
+                  var request = URLRequest(url: url)
+                  request.httpMethod = "POST"
+                  request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                  request.httpBody = try? JSONEncoder().encode(payload)
+                  _ = try? await URLSession.shared.data(for: request)
+              }
+          }
+          WISHLIST_EOF
+          cat > Sources/OnboardingView.swift <<'WISHLIST_EOF'
+          import SwiftUI
+
+          struct OnboardingView: View {
+              @EnvironmentObject var store: WishStore
+              @State private var name = ""
+              @FocusState private var focused: Bool
+
+              var body: some View {
+                  ZStack {
+                      LinearGradient(colors: [.red, .orange, .pink],
+                                     startPoint: .topLeading, endPoint: .bottomTrailing)
+                          .ignoresSafeArea()
+
+                      VStack(spacing: 28) {
+                          Spacer()
+                          Text("🎁")
+                              .font(.system(size: 90))
+                          Text("Wishlist")
+                              .font(.system(size: 44, weight: .heavy, design: .rounded))
+                              .foregroundStyle(.white)
+                          Text("Save everything you want for birthdays, holidays and more. Your parents get a ping when you add something.")
+                              .font(.body)
+                              .multilineTextAlignment(.center)
+                              .foregroundStyle(.white.opacity(0.9))
+                              .padding(.horizontal, 32)
+
+                          VStack(spacing: 14) {
+                              TextField("What's your name?", text: $name)
+                                  .focused($focused)
+                                  .padding()
+                                  .background(.white, in: RoundedRectangle(cornerRadius: 16))
+                                  .foregroundStyle(.black)
+                                  .submitLabel(.go)
+                                  .onSubmit(start)
+
+                              Button(action: start) {
+                                  Text("Let's go!")
+                                      .font(.headline)
+                                      .frame(maxWidth: .infinity)
+                                      .padding()
+                                      .background(.black.opacity(name.isEmpty ? 0.25 : 0.8),
+                                                  in: RoundedRectangle(cornerRadius: 16))
+                                      .foregroundStyle(.white)
+                              }
+                              .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
+                          }
+                          .padding(.horizontal, 32)
+                          Spacer()
+                      }
+                  }
+              }
+
+              private func start() {
+                  guard !name.trimmingCharacters(in: .whitespaces).isEmpty else { return }
+                  store.completeSetup(name: name)
+              }
+          }
+          WISHLIST_EOF
+          cat > Sources/ParentsView.swift <<'WISHLIST_EOF'
+          import SwiftUI
+
+          struct ParentsView: View {
+              @EnvironmentObject var store: WishStore
+              @State private var copied = false
+              @State private var confirmReset = false
+
+              var body: some View {
+                  NavigationStack {
+                      List {
+                          Section {
+                              VStack(alignment: .leading, spacing: 10) {
+                                  Text("🔔 Get notified")
+                                      .font(.title3.bold())
+                                  Text("Parents get a push notification every time \(store.childName) adds a wish. It uses the free ntfy app.")
+                                      .foregroundStyle(.secondary)
+                              }
+                              .padding(.vertical, 6)
+                          }
+
+                          Section("Parent setup") {
+                              Label("Install the free “ntfy” app", systemImage: "1.circle.fill")
+                              Label("Tap + and subscribe to the code below", systemImage: "2.circle.fill")
+                              Label("Allow notifications. Done!", systemImage: "3.circle.fill")
+                          }
+
+                          Section("Family code") {
+                              Text(store.topic)
+                                  .font(.system(.body, design: .monospaced))
+                                  .textSelection(.enabled)
+                              Button {
+                                  UIPasteboard.general.string = store.topic
+                                  copied = true
+                              } label: {
+                                  Label(copied ? "Copied!" : "Copy code", systemImage: "doc.on.doc")
+                              }
+                              ShareLink(item: store.inviteText) {
+                                  Label("Send invite to a parent", systemImage: "square.and.arrow.up")
+                              }
+                              Button { store.sendTest() } label: {
+                                  Label("Send test notification", systemImage: "paperplane.fill")
+                              }
+                          }
+
+                          Section {
+                              Text("Anyone with the code can see notifications, so only share it with family.")
+                                  .font(.caption)
+                                  .foregroundStyle(.secondary)
+                              Button("Reset app", role: .destructive) { confirmReset = true }
+                          }
+                      }
+                      .navigationTitle("Parents")
+                      .confirmationDialog("Erase all wishes and start over?",
+                                          isPresented: $confirmReset, titleVisibility: .visible) {
+                          Button("Erase everything", role: .destructive) { store.reset() }
+                      }
+                  }
+              }
+          }
+          WISHLIST_EOF
+          cat > Sources/WishListApp.swift <<'WISHLIST_EOF'
+          import SwiftUI
+
+          @main
+          struct WishListApp: App {
+              @StateObject private var store = WishStore()
+
+              var body: some Scene {
+                  WindowGroup {
+                      RootView()
+                          .environmentObject(store)
+                          .tint(.red)
+                  }
+              }
+          }
+
+          struct RootView: View {
+              @EnvironmentObject var store: WishStore
+
+              var body: some View {
+                  if store.onboarded {
+                      TabView {
+                          WishListView()
+                              .tabItem { Label("My Wishes", systemImage: "gift.fill") }
+                          ParentsView()
+                              .tabItem { Label("Parents", systemImage: "bell.badge.fill") }
+                      }
+                  } else {
+                      OnboardingView()
+                  }
+              }
+          }
+          WISHLIST_EOF
+          cat > Sources/WishListView.swift <<'WISHLIST_EOF'
+          import SwiftUI
+
+          struct OccasionChip: View {
+              let title: String
+              let emoji: String
+              let color: Color
+              let selected: Bool
+
+              var body: some View {
+                  HStack(spacing: 6) {
+                      Text(emoji)
+                      Text(title).font(.subheadline.weight(.semibold))
+                  }
+                  .padding(.horizontal, 14)
+                  .padding(.vertical, 9)
+                  .background(selected ? color : color.opacity(0.12), in: Capsule())
+                  .foregroundStyle(selected ? .white : color)
+              }
+          }
+
+          struct WishCard: View {
+              let item: WishItem
+
+              var body: some View {
+                  HStack(spacing: 14) {
+                      Text(item.occasion.emoji)
+                          .font(.system(size: 30))
+                          .frame(width: 58, height: 58)
+                          .background(item.occasion.color.opacity(0.15),
+                                      in: RoundedRectangle(cornerRadius: 16))
+
+                      VStack(alignment: .leading, spacing: 5) {
+                          Text(item.name)
+                              .font(.headline)
+                              .strikethrough(item.isGot)
+                          if !item.note.isEmpty {
+                              Text(item.note)
+                                  .font(.subheadline)
+                                  .foregroundStyle(.secondary)
+                                  .lineLimit(2)
+                          }
+                          HStack(spacing: 8) {
+                              if !item.price.isEmpty {
+                                  Text(item.price)
+                                      .font(.caption.weight(.bold))
+                                      .padding(.horizontal, 8).padding(.vertical, 3)
+                                      .background(.green.opacity(0.15), in: Capsule())
+                                      .foregroundStyle(.green)
+                              }
+                              Text(item.occasion.title)
+                                  .font(.caption)
+                                  .foregroundStyle(.secondary)
+                          }
+                      }
+                      Spacer()
+                      if item.isGot {
+                          Image(systemName: "checkmark.seal.fill").foregroundStyle(.green)
+                      } else if !item.urlString.isEmpty, let url = URL(string: item.urlString) {
+                          Link(destination: url) {
+                              Image(systemName: "arrow.up.right.circle.fill")
+                                  .font(.title2)
+                          }
+                      }
+                  }
+                  .padding(14)
+                  .background(Color(.secondarySystemGroupedBackground),
+                              in: RoundedRectangle(cornerRadius: 22))
+                  .shadow(color: .black.opacity(0.06), radius: 8, y: 3)
+                  .opacity(item.isGot ? 0.6 : 1)
+              }
+          }
+
+          struct WishListView: View {
+              @EnvironmentObject var store: WishStore
+              @State private var filter: Occasion? = nil
+              @State private var showAdd = false
+
+              private var filtered: [WishItem] {
+                  guard let filter else { return store.items }
+                  return store.items.filter { $0.occasion == filter }
+              }
+
+              var body: some View {
+                  NavigationStack {
+                      List {
+                          Section {
+                              ScrollView(.horizontal, showsIndicators: false) {
+                                  HStack(spacing: 8) {
+                                      Button { filter = nil } label: {
+                                          OccasionChip(title: "All", emoji: "✨", color: .indigo, selected: filter == nil)
+                                      }
+                                      ForEach(Occasion.allCases) { o in
+                                          Button { filter = o } label: {
+                                              OccasionChip(title: o.title, emoji: o.emoji, color: o.color, selected: filter == o)
+                                          }
+                                      }
+                                  }
+                                  .padding(.horizontal, 20)
+                              }
+                              .listRowInsets(EdgeInsets())
+                              .listRowBackground(Color.clear)
+                          }
+
+                          if filtered.isEmpty {
+                              VStack(spacing: 10) {
+                                  Text("🎅").font(.system(size: 60))
+                                  Text("Nothing here yet")
+                                      .font(.title3.bold())
+                                  Text("Tap + to add your first wish.")
+                                      .foregroundStyle(.secondary)
+                              }
+                              .frame(maxWidth: .infinity)
+                              .padding(.vertical, 50)
+                              .listRowBackground(Color.clear)
+                              .listRowSeparator(.hidden)
+                          } else {
+                              ForEach(filtered) { item in
+                                  WishCard(item: item)
+                                      .listRowSeparator(.hidden)
+                                      .listRowBackground(Color.clear)
+                                      .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
+                                      .swipeActions(edge: .trailing) {
+                                          Button(role: .destructive) { store.delete(item) } label: {
+                                              Label("Delete", systemImage: "trash")
+                                          }
+                                      }
+                                      .swipeActions(edge: .leading) {
+                                          Button { store.toggleGot(item) } label: {
+                                              Label(item.isGot ? "Undo" : "Got it", systemImage: "checkmark")
+                                          }
+                                          .tint(.green)
+                                      }
+                              }
+                          }
+                      }
+                      .listStyle(.plain)
+                      .background(Color(.systemGroupedBackground))
+                      .navigationTitle("\(store.childName)'s Wishes")
+                      .toolbar {
+                          ToolbarItem(placement: .topBarTrailing) {
+                              Button { showAdd = true } label: {
+                                  Image(systemName: "plus.circle.fill").font(.title2)
+                              }
+                          }
+                      }
+                      .sheet(isPresented: $showAdd) {
+                          AddItemView(defaultOccasion: filter ?? .christmas)
+                      }
+                  }
+              }
+          }
+          WISHLIST_EOF
+          cat > Sources/WishStore.swift <<'WISHLIST_EOF'
+          import SwiftUI
+
+          struct Snapshot: Codable {
+              var childName: String
+              var topic: String
+              var items: [WishItem]
+              var onboarded: Bool
+          }
+
+          @MainActor
+          final class WishStore: ObservableObject {
+              @Published var childName = ""
+              @Published var topic = ""
+              @Published var items: [WishItem] = []
+              @Published var onboarded = false
+
+              private let key = "wishlist.snapshot.v1"
+
+              init() { load() }
+
+              // MARK: Persistence
+
+              private func load() {
+                  guard let data = UserDefaults.standard.data(forKey: key),
+                        let snap = try? JSONDecoder().decode(Snapshot.self, from: data) else { return }
+                  childName = snap.childName
+                  topic = snap.topic
+                  items = snap.items
+                  onboarded = snap.onboarded
+              }
+
+              private func save() {
+                  let snap = Snapshot(childName: childName, topic: topic, items: items, onboarded: onboarded)
+                  if let data = try? JSONEncoder().encode(snap) {
+                      UserDefaults.standard.set(data, forKey: key)
+                  }
+              }
+
+              // MARK: Actions
+
+              func completeSetup(name: String) {
+                  let clean = name.trimmingCharacters(in: .whitespacesAndNewlines)
+                  childName = clean
+                  let letters = clean.lowercased().filter { $0.isLetter && $0.isASCII }
+                  let suffix = String((0..<8).map { _ in "abcdefghijklmnopqrstuvwxyz0123456789".randomElement()! })
+                  topic = "wishlist-\(letters)-\(suffix)"
+                  onboarded = true
+                  save()
+              }
+
+              func add(_ item: WishItem) {
+                  items.insert(item, at: 0)
+                  save()
+                  let name = childName
+                  let topic = topic
+                  Task {
+                      await Notifier.send(
+                          topic: topic,
+                          title: "\(name) added a wish \(item.occasion.emoji)",
+                          message: "\(name) added \"\(item.name)\" to their \(item.occasion.title) list."
+                              + (item.price.isEmpty ? "" : " (\(item.price))"),
+                          link: item.urlString
+                      )
+                  }
+              }
+
+              func toggleGot(_ item: WishItem) {
+                  guard let i = items.firstIndex(of: item) else { return }
+                  items[i].isGot.toggle()
+                  save()
+              }
+
+              func delete(_ item: WishItem) {
+                  items.removeAll { $0.id == item.id }
+                  save()
+              }
+
+              func sendTest() {
+                  let name = childName
+                  let topic = topic
+                  Task {
+                      await Notifier.send(topic: topic,
+                                          title: "Test from \(name)'s wish list 🎁",
+                                          message: "If you can read this, notifications are working!")
+                  }
+              }
+
+              func reset() {
+                  UserDefaults.standard.removeObject(forKey: key)
+                  childName = ""; topic = ""; items = []; onboarded = false
+              }
+
+              var inviteText: String {
+                  """
+                  Hi! I made a wish list. To get a notification whenever I add something:
+                  1. Install the free "ntfy" app from the App Store
+                  2. Tap + and subscribe to this topic: \(topic)
+                  """
+              }
+          }
+          WISHLIST_EOF
+
       - name: Install XcodeGen
         run: brew install xcodegen
+
       - name: Build IPA
-        run: bash build_ipa.sh
+        run: |
+          xcodegen generate
+          xcodebuild -project Wishlist.xcodeproj -scheme Wishlist -configuration Release -sdk iphoneos -derivedDataPath build CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build
+          rm -rf Payload Wishlist.ipa
+          mkdir Payload
+          cp -R build/Build/Products/Release-iphoneos/Wishlist.app Payload/
+          zip -qr Wishlist.ipa Payload
+
       - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
